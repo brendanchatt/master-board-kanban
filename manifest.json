@@ -1,0 +1,10 @@
+{
+	"id": "master-board-kanban",
+	"name": "MasterBoard (Kanban)",
+	"version": "0.1",
+	"minAppVersion": "0.15.0",
+	"description": "Programatically maintains a master board of a collection of Kanban boards.",
+	"author": "@brendanchatt",
+	"authorUrl": "https://brendanchatt.me",
+	"isDesktopOnly": false
+}
