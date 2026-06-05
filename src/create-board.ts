@@ -16,6 +16,7 @@ export interface CreateLinkedBoardResult {
 
 export interface CreateLinkedBoardOptions {
 	destinationColumn?: string | null;
+	destinationColumnIndex?: number | null;
 }
 
 const CHILD_BOARD_STATUS_ORDER: StatusKey[] = ['todo', 'active', 'nearlyDone', 'done'];
@@ -47,12 +48,15 @@ export async function createLinkedChildBoard(
 	const childPath = getUniqueMarkdownPath(app, parentFile, title);
 	const childFile = await app.vault.create(
 		childPath,
-		buildChildBoardContent(title, getChildColumns(parentColumnNames, parentConfig))
+		buildChildBoardContent(getChildColumns(parentColumnNames, parentConfig))
 	);
 
-	const destinationColumn = options.destinationColumn && parentColumnNames.includes(options.destinationColumn)
-		? options.destinationColumn
-		: findDestinationColumn(parentColumnNames, 'todo', parentConfig)
+	const destinationColumn = findRequestedColumn(
+		parentColumnNames,
+		options.destinationColumn,
+		options.destinationColumnIndex
+	)
+		?? findDestinationColumn(parentColumnNames, 'todo', parentConfig)
 		?? parentColumnNames[0]
 		?? null;
 
@@ -69,6 +73,31 @@ export async function createLinkedChildBoard(
 	};
 }
 
+function findRequestedColumn(
+	parentColumnNames: string[],
+	destinationColumn?: string | null,
+	destinationColumnIndex?: number | null
+): string | null {
+	const requestedColumn = destinationColumn?.trim();
+	if (requestedColumn) {
+		const exactColumn = parentColumnNames.find((column) => column === requestedColumn);
+		if (exactColumn) {
+			return exactColumn;
+		}
+	}
+
+	if (
+		typeof destinationColumnIndex === 'number'
+		&& Number.isInteger(destinationColumnIndex)
+		&& destinationColumnIndex >= 0
+		&& destinationColumnIndex < parentColumnNames.length
+	) {
+		return parentColumnNames[destinationColumnIndex];
+	}
+
+	return null;
+}
+
 function getChildColumns(parentColumnNames: string[], parentConfig: ReturnType<typeof buildBoardConfig>): string[] {
 	const columns: string[] = [];
 
@@ -82,16 +111,14 @@ function getChildColumns(parentColumnNames: string[], parentConfig: ReturnType<t
 	return columns.length > 0 ? columns : FALLBACK_CHILD_COLUMNS;
 }
 
-function buildChildBoardContent(title: string, columns: string[]): string {
-	const body = columns.map((column) => `## ${column}\n`).join('\n\n');
+function buildChildBoardContent(columns: string[]): string {
+	const body = columns.map((column) => `## ${column}\n`).join('\n');
 
 	return `---
 kanban-plugin: board
 tags:
   - master-board
 ---
-
-# ${title}
 
 ${body}
 

@@ -12,6 +12,18 @@ import {
 	parseAliasInput,
 } from './src/settings';
 
+const KANBAN_VIEW_TYPE = 'kanban';
+
+interface KanbanDestination {
+	columnName?: string | null;
+	columnIndex?: number | null;
+}
+
+interface KanbanLaneContext {
+	element: Element | null;
+	destination: KanbanDestination;
+}
+
 export default class MasterBoard extends Plugin {
 	settings: MasterBoardSettings;
 	private pendingAutoSyncs = new Map<string, ReturnType<typeof setTimeout>>();
@@ -91,7 +103,7 @@ export default class MasterBoard extends Plugin {
 
 	private openCreateBoardModal(
 		file = this.app.workspace.getActiveFile(),
-		destinationColumn?: string | null,
+		destination: KanbanDestination = {},
 		initialTitle = ''
 	) {
 		if (!(file instanceof TFile)) {
@@ -106,8 +118,11 @@ export default class MasterBoard extends Plugin {
 
 		new CreateLinkedBoardModal(this.app, async (title) => {
 			try {
-				const result = await createLinkedChildBoard(this.app, file, title, this.settings, { destinationColumn });
-				await this.app.workspace.getLeaf(false).openFile(result.childFile);
+				const result = await createLinkedChildBoard(this.app, file, title, this.settings, {
+					destinationColumn: destination.columnName,
+					destinationColumnIndex: destination.columnIndex,
+				});
+				await this.openChildBoardFile(result.childFile);
 				new Notice(`Created ${result.childFile.basename} and linked it from ${file.basename}.`);
 			} catch (error) {
 				console.error('Master Board create child board failed', error);
@@ -123,22 +138,40 @@ export default class MasterBoard extends Plugin {
 			return;
 		}
 
-		const lane = sourceEl.closest('.kanban-plugin__lane');
-		const destinationColumn = lane?.querySelector('.kanban-plugin__lane-title-text')?.textContent?.trim() ?? null;
-		const editorTitle = getCardEditorText(lane);
+		const laneContext = getKanbanLaneContext(sourceEl);
+		const editorTitle = getCardEditorText(laneContext.element);
 
 		if (!editorTitle) {
-			this.openCreateBoardModal(file, destinationColumn);
+			this.openCreateBoardModal(file, laneContext.destination);
 			return;
 		}
 
 		try {
-			const result = await createLinkedChildBoard(this.app, file, editorTitle, this.settings, { destinationColumn });
-			await this.app.workspace.getLeaf(false).openFile(result.childFile);
+			const result = await createLinkedChildBoard(this.app, file, editorTitle, this.settings, {
+				destinationColumn: laneContext.destination.columnName,
+				destinationColumnIndex: laneContext.destination.columnIndex,
+			});
+			await this.openChildBoardFile(result.childFile);
 			new Notice(`Created ${result.childFile.basename} and linked it from ${file.basename}.`);
 		} catch (error) {
 			console.error('Master Board create board-card failed', error);
 			new Notice(error instanceof Error ? error.message : 'Could not create board-card.');
+		}
+	}
+
+	private async openChildBoardFile(file: TFile) {
+		const leaf = this.app.workspace.getLeaf(false);
+
+		try {
+			await leaf.setViewState({
+				type: KANBAN_VIEW_TYPE,
+				state: {
+					file: file.path,
+				},
+			});
+		} catch (error) {
+			console.warn('Master Board could not open the child board in Kanban view.', error);
+			await leaf.openFile(file);
 		}
 	}
 
@@ -353,11 +386,70 @@ function getCardEditorText(scope: Element | null): string {
 	return editor?.textContent?.trim() ?? '';
 }
 
+function getKanbanLaneContext(sourceEl: Element): KanbanLaneContext {
+	const lane = getKanbanLane(sourceEl);
+
+	return {
+		element: lane,
+		destination: {
+			columnName: getKanbanLaneTitle(lane),
+			columnIndex: getKanbanLaneIndex(lane),
+		},
+	};
+}
+
+function getKanbanLane(sourceEl: Element): Element | null {
+	const lane = sourceEl.closest('.kanban-plugin__lane');
+	if (lane) {
+		return lane;
+	}
+
+	return sourceEl.closest('.kanban-plugin__lane-wrapper')?.querySelector('.kanban-plugin__lane') ?? null;
+}
+
+function getKanbanLaneTitle(lane: Element | null): string | null {
+	const title = lane?.querySelector('.kanban-plugin__lane-title-text')?.textContent?.trim();
+	return title || null;
+}
+
+function getKanbanLaneIndex(lane: Element | null): number | null {
+	const laneWrapper = lane?.closest('.kanban-plugin__lane-wrapper');
+	if (laneWrapper?.parentElement) {
+		const laneWrappers = Array.from(
+			laneWrapper.parentElement.querySelectorAll(':scope > .kanban-plugin__lane-wrapper')
+		);
+		const laneWrapperIndex = laneWrappers.indexOf(laneWrapper);
+		if (laneWrapperIndex >= 0) {
+			return laneWrapperIndex;
+		}
+	}
+
+	if (lane?.parentElement) {
+		const siblingLanes = Array.from(lane.parentElement.querySelectorAll(':scope > .kanban-plugin__lane'));
+		const laneIndex = siblingLanes.indexOf(lane);
+		if (laneIndex >= 0) {
+			return laneIndex;
+		}
+	}
+
+	const board = lane?.closest('.kanban-plugin');
+	if (board && lane) {
+		const boardLanes = Array.from(board.querySelectorAll('.kanban-plugin__lane'));
+		const boardLaneIndex = boardLanes.indexOf(lane);
+		if (boardLaneIndex >= 0) {
+			return boardLaneIndex;
+		}
+	}
+
+	return null;
+}
+
 class CreateLinkedBoardModal extends Modal {
 	private titleValue = '';
-	private onSubmit: (title: string) => void;
+	private isSubmitted = false;
+	private onSubmit: (title: string) => void | Promise<void>;
 
-	constructor(app: App, onSubmit: (title: string) => void, initialTitle = '') {
+	constructor(app: App, onSubmit: (title: string) => void | Promise<void>, initialTitle = '') {
 		super(app);
 		this.onSubmit = onSubmit;
 		this.titleValue = initialTitle;
@@ -380,7 +472,9 @@ class CreateLinkedBoardModal extends Modal {
 					});
 
 				text.inputEl.addEventListener('keydown', (event) => {
-					if (event.key === 'Enter') {
+					if (event.key === 'Enter' && !event.isComposing) {
+						event.preventDefault();
+						event.stopPropagation();
 						this.submit();
 					}
 				});
@@ -400,14 +494,19 @@ class CreateLinkedBoardModal extends Modal {
 	}
 
 	private submit() {
+		if (this.isSubmitted) {
+			return;
+		}
+
 		const title = this.titleValue.trim();
 		if (!title) {
 			new Notice('Enter a board name first.');
 			return;
 		}
 
+		this.isSubmitted = true;
 		this.close();
-		this.onSubmit(title);
+		void this.onSubmit(title);
 	}
 }
 
