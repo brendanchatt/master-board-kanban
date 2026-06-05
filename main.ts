@@ -1,5 +1,6 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, setIcon } from 'obsidian';
 
+import { createLinkedChildBoard } from './src/create-board';
 import { findParentBoards, inspectBoard, isBoardFile, syncBoard } from './src/rollup';
 import {
 	DEFAULT_SETTINGS,
@@ -15,12 +16,35 @@ export default class MasterBoard extends Plugin {
 	settings: MasterBoardSettings;
 	private pendingAutoSyncs = new Map<string, ReturnType<typeof setTimeout>>();
 	private runningAutoSyncs = new Set<string>();
+	private kanbanButtonObserver: MutationObserver | null = null;
+	private kanbanButtonRefresh: ReturnType<typeof requestAnimationFrame> | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
 		this.addSettingTab(new MasterBoardSettingTab(this.app, this));
 		this.registerAutoSync();
+		this.registerKanbanBoardCardButtons();
+		this.addRibbonIcon('layout-list', 'Create linked child board', () => {
+			this.openCreateBoardModal();
+		});
+
+		this.addCommand({
+			id: 'create-linked-child-board',
+			name: 'Create linked child board',
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!(file instanceof TFile)) {
+					return false;
+				}
+
+				if (!checking) {
+					this.openCreateBoardModal(file);
+				}
+
+				return true;
+			},
+		});
 
 		this.addCommand({
 			id: 'inspect-current-board-rollups',
@@ -63,6 +87,59 @@ export default class MasterBoard extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	private openCreateBoardModal(
+		file = this.app.workspace.getActiveFile(),
+		destinationColumn?: string | null,
+		initialTitle = ''
+	) {
+		if (!(file instanceof TFile)) {
+			new Notice('Open a parent board before creating a linked child board.');
+			return;
+		}
+
+		if (!isBoardFile(this.app, file)) {
+			new Notice('Open a Kanban board before creating a linked child board.');
+			return;
+		}
+
+		new CreateLinkedBoardModal(this.app, async (title) => {
+			try {
+				const result = await createLinkedChildBoard(this.app, file, title, this.settings, { destinationColumn });
+				await this.app.workspace.getLeaf(false).openFile(result.childFile);
+				new Notice(`Created ${result.childFile.basename} and linked it from ${file.basename}.`);
+			} catch (error) {
+				console.error('Master Board create child board failed', error);
+				new Notice(error instanceof Error ? error.message : 'Could not create linked child board.');
+			}
+		}, initialTitle).open();
+	}
+
+	private async createBoardCardFromKanbanButton(sourceEl: HTMLElement) {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || !isBoardFile(this.app, file)) {
+			new Notice('Open a Kanban board before creating a board-card.');
+			return;
+		}
+
+		const lane = sourceEl.closest('.kanban-plugin__lane');
+		const destinationColumn = lane?.querySelector('.kanban-plugin__lane-title-text')?.textContent?.trim() ?? null;
+		const editorTitle = getCardEditorText(lane);
+
+		if (!editorTitle) {
+			this.openCreateBoardModal(file, destinationColumn);
+			return;
+		}
+
+		try {
+			const result = await createLinkedChildBoard(this.app, file, editorTitle, this.settings, { destinationColumn });
+			await this.app.workspace.getLeaf(false).openFile(result.childFile);
+			new Notice(`Created ${result.childFile.basename} and linked it from ${file.basename}.`);
+		} catch (error) {
+			console.error('Master Board create board-card failed', error);
+			new Notice(error instanceof Error ? error.message : 'Could not create board-card.');
+		}
 	}
 
 	private async inspectCurrentBoard(file: TFile) {
@@ -126,6 +203,82 @@ export default class MasterBoard extends Plugin {
 		});
 
 		this.register(() => this.clearAutoSyncTimers());
+	}
+
+	private registerKanbanBoardCardButtons() {
+		this.kanbanButtonObserver = new MutationObserver(() => this.scheduleKanbanButtonRefresh());
+		this.kanbanButtonObserver.observe(document.body, {
+			childList: true,
+			subtree: true,
+		});
+
+		this.register(() => {
+			this.kanbanButtonObserver?.disconnect();
+			this.kanbanButtonObserver = null;
+			if (this.kanbanButtonRefresh) {
+				cancelAnimationFrame(this.kanbanButtonRefresh);
+				this.kanbanButtonRefresh = null;
+			}
+		});
+
+		this.scheduleKanbanButtonRefresh();
+	}
+
+	private scheduleKanbanButtonRefresh() {
+		if (this.kanbanButtonRefresh) {
+			return;
+		}
+
+		this.kanbanButtonRefresh = requestAnimationFrame(() => {
+			this.kanbanButtonRefresh = null;
+			this.addKanbanBoardCardButtons();
+		});
+	}
+
+	private addKanbanBoardCardButtons() {
+		document
+			.querySelectorAll<HTMLElement>('.kanban-plugin__new-item-button')
+			.forEach((button) => this.addBoardCardButtonNearNewItemButton(button));
+
+		document
+			.querySelectorAll<HTMLElement>('.kanban-plugin__item-input-actions')
+			.forEach((actions) => this.addBoardCardButtonToInputActions(actions));
+	}
+
+	private addBoardCardButtonNearNewItemButton(button: HTMLElement) {
+		if (button.parentElement?.querySelector(':scope > .master-board-kanban-board-card-button')) {
+			return;
+		}
+
+		const boardButton = this.buildBoardCardButton('Board card');
+		button.insertAdjacentElement('afterend', boardButton);
+	}
+
+	private addBoardCardButtonToInputActions(actions: HTMLElement) {
+		if (actions.querySelector(':scope > .master-board-kanban-board-card-button')) {
+			return;
+		}
+
+		const boardButton = this.buildBoardCardButton('Create board-card from this title');
+		actions.appendChild(boardButton);
+	}
+
+	private buildBoardCardButton(label: string): HTMLButtonElement {
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.addClass('master-board-kanban-board-card-button');
+		button.setAttr('aria-label', label);
+		button.setAttr('title', label);
+		setIcon(button, 'layout-list');
+		button.createSpan({ text: 'Board' });
+
+		this.registerDomEvent(button, 'click', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.createBoardCardFromKanbanButton(button);
+		});
+
+		return button;
 	}
 
 	private scheduleAffectedBoards(file: TFile) {
@@ -192,6 +345,69 @@ export default class MasterBoard extends Plugin {
 		}
 
 		this.pendingAutoSyncs.clear();
+	}
+}
+
+function getCardEditorText(scope: Element | null): string {
+	const editor = scope?.querySelector('.kanban-plugin__item-input-wrapper .cm-content');
+	return editor?.textContent?.trim() ?? '';
+}
+
+class CreateLinkedBoardModal extends Modal {
+	private titleValue = '';
+	private onSubmit: (title: string) => void;
+
+	constructor(app: App, onSubmit: (title: string) => void, initialTitle = '') {
+		super(app);
+		this.onSubmit = onSubmit;
+		this.titleValue = initialTitle;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+
+		contentEl.empty();
+		contentEl.createEl('h2', { text: 'Create Linked Child Board' });
+
+		new Setting(contentEl)
+			.setName('Board name')
+			.addText((text) => {
+				text
+					.setPlaceholder('New board')
+					.setValue(this.titleValue)
+					.onChange((value) => {
+						this.titleValue = value;
+					});
+
+				text.inputEl.addEventListener('keydown', (event) => {
+					if (event.key === 'Enter') {
+						this.submit();
+					}
+				});
+
+				window.setTimeout(() => text.inputEl.focus(), 0);
+			});
+
+		new Setting(contentEl)
+			.addButton((button) => button
+				.setButtonText('Create board')
+				.setCta()
+				.onClick(() => this.submit()));
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+
+	private submit() {
+		const title = this.titleValue.trim();
+		if (!title) {
+			new Notice('Enter a board name first.');
+			return;
+		}
+
+		this.close();
+		this.onSubmit(title);
 	}
 }
 

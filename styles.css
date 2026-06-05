@@ -3,3 +3,17 @@
 	width: 100%;
 	font-family: var(--font-monospace);
 }
+
+.master-board-kanban-board-card-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--size-2-1);
+	font-size: var(--font-ui-smaller);
+	line-height: 1;
+}
+
+.master-board-kanban-board-card-button svg {
+	width: 14px;
+	height: 14px;
+}

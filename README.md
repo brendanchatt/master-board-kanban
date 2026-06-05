@@ -61,6 +61,10 @@ Automatic sync is enabled by default with a short debounce. Manual sync remains 
 
 For a one-off manual sync, run `Sync current board rollups` on the parent board. For a non-writing preview, run `Inspect current board rollups`.
 
+To create a linked child board from the current parent board, use the MasterBoard ribbon button or run `Create linked child board`. The plugin creates a new Kanban note in the same folder and inserts a `[[New Board]]` card into the parent board.
+
+Inside the Kanban board UI, MasterBoard also adds a `Board` button next to Kanban's add-card controls. Click it in a list to create a child board card directly in that list. If the card editor is open and you have typed a title, the `Board` button uses that typed title for the new child board.
+
 ## Architecture (Planned)
 
 ```
